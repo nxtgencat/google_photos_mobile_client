@@ -27,6 +27,7 @@ from . import utils
 from .api import DEFAULT_TIMEOUT, Api
 from .db import Storage
 from .db_update_parser import parse_db_update
+from .exceptions import SyncCycleError
 from .hash_handler import calculate_sha1_hash, convert_sha1_hash
 
 # Make Ctrl+C work for cancelling threads
@@ -622,12 +623,18 @@ class Client:
                 album_counter += 1
         return album_keys
 
-    def update_cache(self, show_progress: bool = True):
+    def update_cache(self, show_progress: bool = True, max_sync_cycles: int = 10):
         """
         Incrementally update local library cache.
 
+        This implements the sync logic reverse engineered from the Google Photos app:
+        1. Initial sync: Full library download with pagination (resume_token)
+        2. Delta sync: Incremental updates using sync_token with cycle detection
+
         Args:
             show_progress: Whether to display progress in console.
+            max_sync_cycles: Maximum sync cycles for delta sync (prevents infinite loops).
+                            Based on Google Photos app's sync cycle detection logic.
         """
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         progress = Progress(
@@ -635,11 +642,13 @@ class Client:
             SpinnerColumn(),
             "Updates: [green]{task.fields[updated]:>8}[/green]",
             "Deletions: [red]{task.fields[deleted]:>8}[/red]",
+            "Pages: [cyan]{task.fields[pages]:>6}[/cyan]",
         )
         task_id = progress.add_task(
             "[bold magenta]Updating local cache[/bold magenta]:",
             updated=0,
             deleted=0,
+            pages=0,
         )
         context = (show_progress and Live(progress)) or nullcontext()
 
@@ -654,68 +663,38 @@ class Client:
                 with Storage(self.db_path) as storage:
                     storage.set_init_state(1)
             self.logger.info("Cache Update")
-            self._cache_update(progress, task_id)
+            self._cache_update(progress, task_id, max_sync_cycles)
 
-    def _cache_update(self, progress, task_id):
-        with Storage(self.db_path) as storage:
-            state_token, _ = storage.get_state_tokens()
-        response = self.api.get_library_state(state_token)
-        next_state_token, next_page_token, remote_media, media_keys_to_delete = parse_db_update(response)
-
-        with Storage(self.db_path) as storage:
-            storage.update_state_tokens(next_state_token, next_page_token)
-            storage.update(remote_media)
-            storage.delete(media_keys_to_delete)
-
-        task = progress.tasks[int(task_id)]
-        progress.update(
-            task_id,
-            updated=task.fields["updated"] + len(remote_media),
-            deleted=task.fields["deleted"] + len(media_keys_to_delete),
-        )
-
-        if next_page_token:
-            self._process_pages(progress, task_id, state_token, next_page_token)
-
-    def _cache_init(self, progress, task_id):
-        with Storage(self.db_path) as storage:
-            state_token, next_page_token = storage.get_state_tokens()
-
-        if next_page_token:
-            self._process_pages_init(progress, task_id, next_page_token)
-
-        response = self.api.get_library_state(state_token)
-        state_token, next_page_token, remote_media, _ = parse_db_update(response)
-
-        with Storage(self.db_path) as storage:
-            storage.update_state_tokens(state_token, next_page_token)
-            storage.update(remote_media)
-
-        task = progress.tasks[int(task_id)]
-        progress.update(
-            task_id,
-            updated=task.fields["updated"] + len(remote_media),
-        )
-
-        if next_page_token:
-            self._process_pages_init(progress, task_id, next_page_token)
-
-    def _process_pages_init(self, progress: Progress, task_id: TaskID, page_token: str):
+    def _cache_update(self, progress, task_id, max_sync_cycles: int = 10):
         """
-        Process paginated results during cache update.
+        Perform delta sync to update the cache with changes since last sync.
 
         Args:
             progress: Rich Progress object for tracking.
             task_id: ID of the progress task.
-            page_token: Token for fetching page of results.
+            max_sync_cycles: Maximum number of sync cycles to prevent infinite loops.
+                             Based on Google Photos app behavior that detects when
+                             sync_token doesn't change between iterations.
         """
-        next_page_token: str | None = page_token
-        while True:
-            response = self.api.get_library_page_init(next_page_token)
-            _, next_page_token, remote_media, media_keys_to_delete = parse_db_update(response)
+        sync_cycle_count = 0
+        previous_sync_token = None
+
+        while sync_cycle_count < max_sync_cycles:
+            with Storage(self.db_path) as storage:
+                sync_token, _ = storage.get_sync_tokens()
+
+            # Infinite sync cycle detection (from Google Photos app logic):
+            # If shouldTriggerNextSync is true but sync token hasn't changed,
+            # stop to avoid infinite sync loop
+            if previous_sync_token and sync_token == previous_sync_token:
+                self.logger.warning(f"Sync token unchanged after {sync_cycle_count} cycles. Stopping to avoid infinite sync loop.")
+                raise SyncCycleError(f"Sync token unchanged after {sync_cycle_count} cycles. sync_token={sync_token[:50]}...")
+
+            response = self.api.get_library_state(sync_token)
+            next_sync_token, next_resume_token, remote_media, media_keys_to_delete = parse_db_update(response)
 
             with Storage(self.db_path) as storage:
-                storage.update_state_tokens(page_token=next_page_token)
+                storage.update_sync_tokens(next_sync_token, next_resume_token)
                 storage.update(remote_media)
                 storage.delete(media_keys_to_delete)
 
@@ -725,25 +704,105 @@ class Client:
                 updated=task.fields["updated"] + len(remote_media),
                 deleted=task.fields["deleted"] + len(media_keys_to_delete),
             )
-            if not next_page_token:
+
+            # Process remaining pages for this sync cycle
+            if next_resume_token:
+                self._process_pages(progress, task_id, sync_token, next_resume_token)
+
+            # Check if we need another sync cycle
+            # Google Photos app triggers next sync when server indicates more data
+            should_continue = self._should_trigger_next_sync(response)
+            if not should_continue:
                 break
 
-    def _process_pages(self, progress: Progress, task_id: TaskID, state_token: str, page_token: str):
+            previous_sync_token = sync_token
+            sync_cycle_count += 1
+            self.logger.debug(f"Triggering sync cycle {sync_cycle_count + 1}")
+
+    def _should_trigger_next_sync(self, response: dict) -> bool:
         """
-        Process paginated results during cache update.
+        Determine if another sync cycle should be triggered.
+
+        Based on Google Photos app behavior, this checks if the server
+        indicates there's more data to sync.
+
+        Args:
+            response: The sync response from the API.
+
+        Returns:
+            bool: True if another sync should be triggered.
+        """
+        # Check for the continuation indicator in the response
+        # Field 1.7 typically indicates if sync should continue (value 2 = continue)
+        try:
+            trigger_value = response.get("1", {}).get("7", 0)
+            return trigger_value == 2
+        except (KeyError, TypeError):
+            return False
+
+    def _cache_init(self, progress, task_id):
+        """
+        Perform initial sync to populate the cache with the full library.
+
+        Based on Google Photos app behavior:
+        - Initial sync fetches the complete library state
+        - Uses resume_token for pagination
+        - Sets sync_token upon completion for future delta syncs
 
         Args:
             progress: Rich Progress object for tracking.
             task_id: ID of the progress task.
-            page_token: Token for fetching page of results.
         """
-        next_page_token: str | None = page_token
+        with Storage(self.db_path) as storage:
+            sync_token, resume_token = storage.get_sync_tokens()
+
+        # Resume incomplete initial sync if there's a pending resume token
+        if resume_token:
+            self.logger.info("Resuming incomplete initial sync")
+            self._process_pages_init(progress, task_id, resume_token)
+
+        response = self.api.get_library_state(sync_token)
+        sync_token, resume_token, remote_media, _ = parse_db_update(response)
+
+        with Storage(self.db_path) as storage:
+            storage.update_sync_tokens(sync_token, resume_token)
+            storage.update(remote_media)
+
+        task = progress.tasks[int(task_id)]
+        progress.update(
+            task_id,
+            updated=task.fields["updated"] + len(remote_media),
+            pages=task.fields["pages"] + 1,
+        )
+
+        self.logger.debug(f"Initial sync first page: {len(remote_media)} items")
+
+        if resume_token:
+            self._process_pages_init(progress, task_id, resume_token)
+
+    def _process_pages_init(self, progress: Progress, task_id: TaskID, resume_token: str):
+        """
+        Process paginated results during initial sync.
+
+        Based on Google Photos app behavior:
+        - Initial sync uses resume_token for pagination
+        - No sync_token is required during initial sync
+        - Pages are fetched until resume_token is empty
+
+        Args:
+            progress: Rich Progress object for tracking.
+            task_id: ID of the progress task.
+            resume_token: Resume token for fetching next page of results.
+        """
+        next_resume_token: str | None = resume_token
+        page_count = 0
         while True:
-            response = self.api.get_library_page(next_page_token, state_token)
-            _, next_page_token, remote_media, media_keys_to_delete = parse_db_update(response)
+            response = self.api.get_library_page_init(next_resume_token)
+            _, next_resume_token, remote_media, media_keys_to_delete = parse_db_update(response)
+            page_count += 1
 
             with Storage(self.db_path) as storage:
-                storage.update_state_tokens(page_token=next_page_token)
+                storage.update_sync_tokens(resume_token=next_resume_token)
                 storage.update(remote_media)
                 storage.delete(media_keys_to_delete)
 
@@ -752,6 +811,51 @@ class Client:
                 task_id,
                 updated=task.fields["updated"] + len(remote_media),
                 deleted=task.fields["deleted"] + len(media_keys_to_delete),
+                pages=task.fields["pages"] + 1,
             )
-            if not next_page_token:
+
+            self.logger.debug(f"Initial sync page {page_count}: {len(remote_media)} items")
+
+            if not next_resume_token:
+                break
+
+    def _process_pages(self, progress: Progress, task_id: TaskID, sync_token: str, resume_token: str):
+        """
+        Process paginated results during delta sync.
+
+        Based on Google Photos app behavior:
+        - Delta sync uses both sync_token and resume_token
+        - sync_token identifies the sync context
+        - resume_token is used for pagination within that sync cycle
+        - Pages are fetched until resume_token is empty
+
+        Args:
+            progress: Rich Progress object for tracking.
+            task_id: ID of the progress task.
+            sync_token: Current sync token for the delta sync context.
+            resume_token: Resume token for fetching next page of results.
+        """
+        next_resume_token: str | None = resume_token
+        page_count = 0
+        while True:
+            response = self.api.get_library_page(next_resume_token, sync_token)
+            _, next_resume_token, remote_media, media_keys_to_delete = parse_db_update(response)
+            page_count += 1
+
+            with Storage(self.db_path) as storage:
+                storage.update_sync_tokens(resume_token=next_resume_token)
+                storage.update(remote_media)
+                storage.delete(media_keys_to_delete)
+
+            task = progress.tasks[int(task_id)]
+            progress.update(
+                task_id,
+                updated=task.fields["updated"] + len(remote_media),
+                deleted=task.fields["deleted"] + len(media_keys_to_delete),
+                pages=task.fields["pages"] + 1,
+            )
+
+            self.logger.debug(f"Delta sync page {page_count}: {len(remote_media)} items, {len(media_keys_to_delete)} deletions")
+
+            if not next_resume_token:
                 break
