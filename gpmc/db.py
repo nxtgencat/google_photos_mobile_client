@@ -13,8 +13,8 @@ class Storage:
 
     def __init__(self, db_path: str | Path) -> None:
         self.conn = sqlite3.connect(db_path)
-        self._create_tables()
         self._migrate()
+        self._create_tables()
 
     def __enter__(self) -> Self:
         return self
@@ -69,6 +69,11 @@ class Storage:
         3. Drop old table
         4. Rename new table
         """
+        # Check if state table exists first
+        cursor = self.conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='state'")
+        if not cursor.fetchone():
+            return  # No state table yet, nothing to migrate
+
         # Check if migration is needed (old column names exist)
         cursor = self.conn.execute("PRAGMA table_info(state)")
         columns = {row[1] for row in cursor.fetchall()}
