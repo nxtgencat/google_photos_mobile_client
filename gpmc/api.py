@@ -354,6 +354,48 @@ class Api:
         decoded_message, _ = decode_message(response.content)
         return decoded_message
 
+    def delete_remote_media_permanently(self, dedup_keys: Sequence[str]) -> dict:
+        """
+        Permanently delete remote media items using deduplication keys.
+
+        Args:
+            dedup_keys: Deduplication keys for the media items to be permanently deleted.
+
+        Returns:
+            dict: Api response message.
+
+        Raises:
+            requests.HTTPError: If the api request fails.
+        """
+
+        proto_body = {
+            "2": 2, 
+            "3": dedup_keys,
+            "4": 2,  
+            "8": {"4": {"2": {}, "3": {"1": {}}, "4": {}, "5": {"1": {}}}},
+            "9": ""
+        }
+        serialized_data = encode_message(proto_body, message_types.DELETE_PERMANENTLY)
+        headers = {
+            "Accept-Encoding": "gzip",
+            "Accept-Language": self.language,
+            "Content-Type": "application/x-protobuf",
+            "User-Agent": self.user_agent,
+            "Authorization": f"Bearer {self.bearer_token}",
+        }
+
+        with self._new_session() as session:
+            response = session.post(
+                "https://photosdata-pa.googleapis.com/6439526531001121323/17490284929287180316",
+                headers=headers,
+                data=serialized_data,
+                timeout=self.timeout,
+            )
+        response.raise_for_status()
+
+        decoded_message, _ = decode_message(response.content)
+        return decoded_message
+
     def create_album(self, album_name: str, media_keys: Sequence[str]) -> str:
         """Create new album with media.
 
