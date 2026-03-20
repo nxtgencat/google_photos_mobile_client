@@ -487,11 +487,11 @@ class Api:
         decoded_message, _ = decode_message(response.content)
         return decoded_message
 
-    def get_library_state(self, state_token: str = "") -> dict:
+    def get_library_state(self, sync_token: str = "") -> dict:
         """Get library state
 
         Args:
-            state_token: Previously received state_token.
+            sync_token: Previously received sync_token (CURRENT_SYNC/NEXT_SYNC in Google Photos app).
 
         Returns:
             dict: Decoded api response.
@@ -630,7 +630,7 @@ class Api:
                     "25": {},
                     "26": {},
                 },
-                "6": state_token,
+                "6": sync_token,
                 "7": 2,
                 "9": {"1": {"2": {"1": {}, "2": {}}}, "2": {"3": {"2": 1}}, "3": {"2": {}}, "4": {}, "7": {"1": {}}, "8": {"1": 2, "2": "\x01\x02\x03\x05\x06\x07"}, "9": {}, "11": {"1": {}}},
                 "11": [1, 2, 6],
@@ -683,11 +683,11 @@ class Api:
         decoded_message, _ = decode_message(response.content, message_type=message_types.LIB_STATE_RESPONSE_FIX)  # type: ignore
         return decoded_message
 
-    def get_library_page_init(self, page_token: str = "") -> dict:
+    def get_library_page_init(self, resume_token: str = "") -> dict:
         """Get library state page during init process
 
         Args:
-            page_token: Page token.
+            resume_token: Resume token for pagination (INITIAL_RESUME in Google Photos app).
 
         Returns:
             dict: Decoded api response.
@@ -812,7 +812,7 @@ class Api:
                     "24": {},
                     "25": {},
                 },
-                "4": page_token,
+                "4": resume_token,
                 "7": 2,
                 "9": {"1": {"2": {"1": {}, "2": {}}}, "2": {"3": {"2": 1}}, "3": {"2": {}}, "4": {}, "7": {"1": {}}, "8": {"1": 2, "2": "\x01\x02\x03\x05\x06"}, "9": {}},
                 "11": [1, 2],
@@ -861,12 +861,12 @@ class Api:
         decoded_message, _ = decode_message(response.content, message_type=message_types.LIB_STATE_RESPONSE_FIX)  # type: ignore
         return decoded_message
 
-    def get_library_page(self, page_token: str = "", state_token: str = "") -> dict:
+    def get_library_page(self, resume_token: str = "", sync_token: str = "") -> dict:
         """Get library state page
 
         Args:
-            page_token: Page token.
-            state_token: State token.
+            resume_token: Resume token for pagination (DELTA_RESUME in Google Photos app).
+            sync_token: Sync token for the delta sync context.
 
         Returns:
             dict: Decoded api response.
@@ -991,8 +991,8 @@ class Api:
                     "24": {},
                     "25": {},
                 },
-                "4": page_token,
-                "6": state_token,
+                "4": resume_token,
+                "6": sync_token,
                 "7": 2,
                 "9": {"1": {"2": {"1": {}, "2": {}}}, "2": {"3": {"2": 1}}, "3": {"2": {}}, "4": {}, "7": {"1": {}}, "8": {"1": 2, "2": "\x01\x02\x03\x05\x06"}, "9": {}},
                 "11": [1, 2],

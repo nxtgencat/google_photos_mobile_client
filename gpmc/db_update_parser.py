@@ -125,9 +125,18 @@ def _get_items_list(data: dict, key: str) -> list[dict]:
 
 
 def parse_db_update(data: dict) -> tuple[str, str | None, list[MediaItem], list[str]]:
-    """Parse the library state from the raw data."""
-    next_page_token = data["1"].get("1", "")
-    state_token = data["1"].get("6", "")
+    """
+    Parse the library state from the raw data.
+
+    Returns:
+        tuple containing:
+        - sync_token: Token for next sync cycle (NEXT_SYNC in Google Photos app)
+        - resume_token: Token for pagination within current sync (INITIAL_RESUME/DELTA_RESUME in app)
+        - remote_media: List of parsed media items
+        - media_keys_to_delete: List of media keys to delete
+    """
+    resume_token = data["1"].get("1", "")
+    sync_token = data["1"].get("6", "")
 
     # Parse media item
     remote_media = []
@@ -144,4 +153,4 @@ def parse_db_update(data: dict) -> tuple[str, str | None, list[MediaItem], list[
     # for d in envelopes:
     #     _parse_envelope_item(d)
 
-    return state_token, next_page_token, remote_media, media_keys_to_delete
+    return sync_token, resume_token, remote_media, media_keys_to_delete
