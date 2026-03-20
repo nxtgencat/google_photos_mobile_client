@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Literal
+from typing import Literal, TypedDict
 
 from rich.console import Group
 from rich.live import Live
@@ -36,7 +36,17 @@ signal.signal(signal.SIGINT, signal.SIG_DFL)
 
 LogLevel = Literal["INFO", "DEBUG", "WARNING", "ERROR", "CRITICAL"]
 
-TargetMapping = Mapping[Path, bytes | str | None]
+
+class UploadOptions(TypedDict, total=False):
+    """Options for uploading a single file."""
+
+    hash: bytes | str | None
+    """The file's SHA-1 hash (bytes, hex string, or Base64 string)."""
+    filename: str | None
+    """Custom filename to use instead of the actual filename."""
+
+
+TargetMapping = Mapping[Path, bytes | str | None | UploadOptions]
 
 
 class Client:
@@ -95,7 +105,7 @@ class Client:
         raise ValueError("`GP_AUTH_DATA` environment variable not set. Create it or provide `auth_data` as an argument.")
 
     def _upload_file(
-        self, file_path: str | Path, hash_value: bytes | str | None, progress: Progress, force_upload: bool, use_quota: bool, saver: bool, delete_from_host: bool = False
+        self, file_path: str | Path, hash_value: bytes | str | None, progress: Progress, force_upload: bool, use_quota: bool, saver: bool, delete_from_host: bool = False, filename: str | None = None
     ) -> dict[str, str]:
         """
         Upload a single file to Google Photos.
@@ -109,6 +119,7 @@ class Client:
             use_quota: Uploaded files will count against your Google Photos storage quota.
             saver: Upload files in storage saver quality.
             delete_from_host: Whether to delete the file from host immediately after successful upload.
+            filename: Custom filename to use instead of the actual filename.
 
         Returns:
             dict[str, str]: A dictionary mapping the absolute file path to its Google Photos media key.
@@ -121,6 +132,7 @@ class Client:
 
         file_path = Path(file_path)
         file_size = file_path.stat().st_size
+        effective_filename = filename if filename else file_path.name
 
         file_progress_id = progress.add_task(description="")
         if hash_value:
@@ -152,7 +164,7 @@ class Client:
                 model = "Pixel 8"
             media_key = self.api.commit_upload(
                 upload_response_decoded=upload_response,
-                file_name=file_path.name,
+                file_name=effective_filename,
                 sha1_hash=hash_bytes,
                 upload_timestamp=last_modified_timestamp,
                 model=model,
@@ -292,7 +304,15 @@ class Client:
         Upload one or more files or directories to Google Photos.
 
         Args:
-            target: A file path, directory path, a sequence of such paths, or a mapping of file paths to their SHA-1 hashes.
+            target: A file path, directory path, a sequence of such paths, or a mapping of file paths
+                to their upload options. Upload options can be:
+                - A SHA-1 hash (bytes, hex string, or Base64 string)
+                - None (hash will be calculated)
+                - An UploadOptions dict with 'hash' and/or 'filename' keys
+
+                Example with custom filename:
+                    {Path("/path/to/file.jpg"): {"hash": None, "filename": "custom_name.jpg"}}
+
             album_name:
                 If provided, the uploaded media will be added to a new album.
                 If set to "AUTO", albums will be created based on the immediate parent directory of each file.
@@ -406,7 +426,7 @@ class Client:
             for path in files_to_upload:
                 path_hash_pairs[path] = None  # empty hash values to be calculated later
 
-        elif isinstance(target, dict) and all(isinstance(k, Path) and isinstance(v, (bytes, str, type(None))) for k, v in target.items()):
+        elif isinstance(target, dict) and all(isinstance(k, Path) and isinstance(v, (bytes, str, dict, type(None))) for k, v in target.items()):
             path_hash_pairs = target
         else:
             raise TypeError("`target` must be a file path, a directory path, or a sequence of such paths.")
@@ -475,7 +495,8 @@ class Client:
         Upload files concurrently to Google Photos.
 
         Args:
-            path_hash_pairs: Mapping of file paths to their SHA-1 hashes.
+            path_hash_pairs: Mapping of file paths to their upload options (hash and/or filename)
+                or just hashes for backwards compatibility.
             threads: Number of concurrent upload threads.
             show_progress: Whether to display progress in console.
             force_upload: Upload even if file exists in Google Photos.
@@ -514,13 +535,20 @@ class Client:
 
         overall_task_id = overall_progress.add_task("Errors: 0", total=len(path_hash_pairs.keys()), visible=show_progress)
         with context, ThreadPoolExecutor(max_workers=threads) as executor:
-            futures = {
-                executor.submit(self._upload_file, path, hash_value, progress=file_progress, force_upload=force_upload, use_quota=use_quota, saver=saver, delete_from_host=delete_from_host): (
-                    path,
-                    hash_value,
-                )
-                for path, hash_value in path_hash_pairs.items()
-            }
+            futures = {}
+            for path, value in path_hash_pairs.items():
+                # Handle both UploadOptions dict and legacy hash-only format
+                if isinstance(value, dict):
+                    hash_value = value.get("hash")
+                    filename = value.get("filename")
+                else:
+                    hash_value = value
+                    filename = None
+                futures[
+                    executor.submit(
+                        self._upload_file, path, hash_value, progress=file_progress, force_upload=force_upload, use_quota=use_quota, saver=saver, delete_from_host=delete_from_host, filename=filename
+                    )
+                ] = (path, value)
             for future in as_completed(futures):
                 target = futures[future]
                 try:
