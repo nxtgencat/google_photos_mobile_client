@@ -11,6 +11,7 @@ class TestUpload(unittest.TestCase):
         self.directory_path = "C:/Users/admin/Pictures"
         self.mkv_file_path = "media/sample_640x360.mkv"
         self.client = Client()
+
     def test_get_manifest_content(self):
         """Test get manifest."""
         output = self.client.api.get_stream_manifest("AF1QipMZCIEXnkW7cyj7UJXZ_sL-GAo3yAlQTyfHgnX3", protocol="hls")
@@ -83,6 +84,18 @@ class TestUpload(unittest.TestCase):
         """Test media upload with precalculated hash."""
         hash_pair = {Path(self.image_file_path): self.image_sha1_hash_b64}
         media_key = self.client.upload(target=hash_pair, force_upload=True, show_progress=True)
+        print(media_key)
+
+    def test_image_upload_with_custom_filename(self):
+        """Test media upload with custom filename."""
+        upload_options = {Path(self.image_file_path): {"filename": "custom_image_name.png"}}
+        media_key = self.client.upload(target=upload_options, force_upload=True, show_progress=True)
+        print(media_key)
+
+    def test_image_upload_with_hash_and_custom_filename(self):
+        """Test media upload with precalculated hash and custom filename."""
+        upload_options = {Path(self.image_file_path): {"hash": self.image_sha1_hash_b64, "filename": "custom_name_with_hash.png"}}
+        media_key = self.client.upload(target=upload_options, force_upload=True, show_progress=True)
         print(media_key)
 
     def test_mkv_upload(self):

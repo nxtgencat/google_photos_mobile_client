@@ -1,3 +1,3 @@
-from gpmc.client import Client
+from gpmc.client import Client, UploadOptions
 
-ALL = [Client]
+ALL = [Client, UploadOptions]
